@@ -1,119 +1,318 @@
-# PawPal+
+# PawPal+ — AI-Powered Pet Care Scheduling System
 
-**PawPal+** is a Streamlit app that helps pet owners build and manage a consistent care schedule for their pets. It tracks tasks across multiple pets, automatically surfaces the most urgent care first, warns about scheduling conflicts, and rolls recurring tasks forward so nothing ever falls through the cracks.
-
----
-
-## Features
-
-### Owner & Pet Management
-Register an owner and one or more pets in a single step. Each pet maintains its own task history, and every owner is tracked independently so the system can detect cross-pet scheduling conflicts.
-
-### Chronological Task Sorting
-All schedule views are sorted by due date, earliest first. When two tasks share the exact same time slot, a secondary medical-priority sort breaks the tie automatically:
-
-| Priority | Task type |
-|---|---|
-| 1 (highest) | Medication |
-| 2 | Vet visit |
-| 3 | Feeding |
-| 4 | Exercise |
-| 5 | Grooming |
-
-This ensures a pet owner always sees the most critical care at the top of their list, without any manual re-ordering.
-
-### Conflict Detection
-Before every task is saved, the scheduler checks the owner's full pending task list for a 30-minute overlap window. Two conflict types are reported:
-
-- **Same-pet conflict** — the pet already has a task in that slot.
-- **Cross-pet owner conflict** — the owner is already occupied with a different pet at that time.
-
-The task is always saved — the owner stays in control — but a clear warning is shown immediately so they can reschedule if needed. Completed tasks never trigger a false conflict.
-
-### Recurring Task Auto-Advance
-Tasks can repeat on a `daily`, `weekly`, or `monthly` cadence. When a recurring task is completed, `get_next_occurrence()` calculates the next due date anchored to today — not the original due date. This means completing an overdue daily feeding will always schedule the next one for tomorrow at the same time, never in the past.
-
-### Status History
-Completed tasks are preserved as a permanent record rather than deleted. The task list splits into two tabs:
-
-- **Pending** — sorted chronologically, with medical-priority color badges (🔴 medication → 🔵 grooming).
-- **Completed** — full history of every task that has been marked done.
-
-Three header metrics (Pending / Completed / Total) give an at-a-glance count before the table loads.
-
-### Overdue Detection
-Any pending task whose due date has passed is flagged automatically. The overdue list is sorted oldest-first so the most neglected task surfaces at the top. Overdue tasks appear above upcoming tasks in the schedule view so nothing critical is buried.
-
-### Schedule Builder
-A slider lets the owner choose a lookahead window (1–30 days). Clicking **Generate schedule** runs two Scheduler queries:
-
-1. `get_upcoming_tasks(days)` — returns all pending tasks in the window, sorted by time then priority.
-2. `check_overdue_tasks()` — surfaces any tasks already past their due date.
-
-A confirmation banner reports the total task count for the selected window.
+A full-stack AI application that helps multi-pet owners plan, schedule, and track consistent care routines — combining a robust domain model with locally-run LLM features that understand natural language and generate context-aware care plans.
 
 ---
 
-## Scenario
+## Original Project (Modules 1–3): PawPal
 
-The scheduler goes beyond a simple task list with four algorithmic improvements:
+The foundation of this project is **PawPal**, a Python-based pet care scheduling system built across the first three modules of the Applied AI Systems course. The original system modeled the real-world complexity of managing care for multiple pets: an `Owner` registers one or more `Pet` profiles, creates `Task` objects for feeding, grooming, medication, vet visits, and exercise, and relies on a central `Scheduler` to detect time conflicts, sort tasks by medical priority, and automatically advance recurring tasks. The core goals were to produce a well-tested, cleanly separated domain model that could later serve as a stable base for AI integration — without requiring a database, API key, or external service for the core logic to function.
 
-**Priority-aware sorting** — `get_upcoming_tasks(days)` sorts first by due time, then by task type when two tasks share the same slot. Medication and vet visits always surface above grooming or exercise, so a pet owner sees the most critical care first.
+---
 
-**Status filtering** — `get_tasks_by_status(status)` lets callers query `"pending"` or `"completed"` tasks independently. Completed tasks are preserved as a history record rather than deleted, and `check_overdue_tasks()` returns the oldest overdue item first so nothing critical gets buried.
+## Title and Summary
 
-**Recurring task auto-advance** — `Task.complete()` marks a task done permanently. For recurring tasks (`"daily"`, `"weekly"`, `"monthly"`), `get_next_occurrence()` calculates the next due date anchored to today using `timedelta`, not the original (potentially stale) due date. This means completing an overdue daily feeding always schedules the next one for tomorrow at the same time — never in the past.
+**PawPal+** extends that foundation with two AI-powered input modes, both running on a local Ollama/Mistral instance:
 
-**Conflict detection** — `has_conflict(task)` checks every new task against all pending tasks for the same owner, covering two cases: a same-pet overlap (the pet already has something in that window) and a cross-pet owner conflict (the owner is already occupied with another pet at that time). Rather than blocking the add, a descriptive warning string is returned so the owner stays informed but in control.
+- **Natural Language Task Entry** — Instead of filling out a form, an owner types a sentence like *"Flea medication every two weeks starting tomorrow at 9 a.m."* The AI extracts structured fields (task type, due date, recurrence) and creates the task automatically.
+- **AI Care Planner** — An owner describes a care goal such as *"Set up a 2-week post-surgery recovery plan for Mochi."* The AI reads the pet's live profile and current schedule, then proposes a full multi-task plan. The owner reviews and confirms before anything is saved.
 
-## Testing PawPal+
+Both features keep the human in control: the AI proposes, the owner decides. This reflects a deliberate design philosophy — AI should reduce friction, not remove agency.
 
-### Running the tests
+---
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      UI Layer  (app.py)                         │
+│   Section 1: Owner & Pet Registration                           │
+│   Section 2: Task Management                                    │
+│     ├── Manual Entry                                            │
+│     ├── Natural Language Entry  ──► ai_parser.py               │
+│     └── AI Care Planner         ──► ai_planner.py              │
+│   Section 3: Schedule Builder                                   │
+└────────────────────────┬────────────────────────────────────────┘
+                         │  all paths produce identical Task objects
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│               Domain Layer  (pawpal_system.py)                  │
+│   Owner ──► Pet ──► Task ──► Scheduler                         │
+│   • Priority-aware chronological sorting                        │
+│   • 30-minute conflict detection (same-pet & cross-pet)        │
+│   • Recurring task auto-advance anchored to today              │
+│   • Status history (pending / completed tabs)                   │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  AI Layer  (ai_parser.py, ai_planner.py)        │
+│   Ollama REST API  →  Mistral 7B (local, no API key required)  │
+│   http://localhost:11434                                        │
+│   All calls logged to pawpal_ai.log                            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The three input paths (manual, natural language, care planner) all converge on the same `Scheduler.add_task()` method, ensuring conflict detection and priority sorting are applied consistently regardless of how a task originated. The domain layer has no knowledge of Ollama; the AI layer has no knowledge of the UI. This clean separation means the core scheduling system works even when Ollama is unavailable.
+
+---
+
+## Setup Instructions
+
+### Prerequisites
+
+1. **Python 3.10+**
+2. **Ollama** — download from [ollama.com](https://ollama.com) and install for your OS
+3. Pull the Mistral model (one-time download, ~4 GB):
+   ```bash
+   ollama pull mistral
+   ```
+
+### Install and Run
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/renubandaru/applied-ai-system-project.git
+cd applied-ai-system-project
+
+# 2. Create and activate a virtual environment
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Start Ollama in a separate terminal (keep it running)
+ollama serve
+
+# 5. Launch the app
+streamlit run app.py
+```
+
+The app opens at **http://localhost:8501**.
+
+### Optional Configuration
+
+Create a `.env` file in the project root to override Ollama defaults:
+
+```
+OLLAMA_URL=http://localhost:11434
+OLLAMA_MODEL=mistral
+```
+
+### Run Tests
 
 ```bash
 python -m pytest tests/test_pawpal.py -v
 ```
 
-### What the tests cover
+---
 
-The test suite has 13 tests across three areas:
+## Sample Interactions
 
-**Sorting correctness** — verifies that `get_upcoming_tasks()` always returns tasks in chronological order regardless of insertion order. Two additional tests confirm the medical-priority tie-break (medication beats feeding beats grooming when tasks share the exact same time slot) and that unknown task types fall gracefully to the end of the list.
+### Interaction 1 — Natural Language Task Entry
 
-**Recurrence logic** — confirms that `get_next_occurrence()` returns a date approximately 1 day (daily) or 7 days (weekly) from now, that a non-recurring task returns `None`, and — critically — that completing an overdue recurring task still schedules the next occurrence in the future, never in the past.
+**User types in the AI text box:**
+> "Flea medication every two weeks starting tomorrow at 9am"
 
-**Conflict detection** — verifies three distinct cases: a same-pet double-booking returns a `SAME-PET` warning, a same-owner cross-pet overlap returns an `OWNER` warning, and tasks belonging to different owners never conflict. A fourth test confirms that completed tasks free their time slot so a new task can be added without a false conflict.
+**System response (extracted fields shown in an expandable panel, then task saved):**
+```
+Task type:    medication
+Description:  Flea medication
+Due date:     2026-04-29 09:00
+Recurrence:   weekly
 
-### Confidence level
-
-**★★★★☆ (4 / 5)**
-
-All 13 tests pass and cover the three core behaviors the scheduler advertises: priority-aware sorting, recurring task auto-advance, and conflict detection. The test suite handles the main happy paths and the most important edge cases (overdue recurrence, completed-task slot release, unknown task types, same-time tie-breaking).
-
-One star is withheld because the tests run against in-memory state and fixed offsets from `datetime.now()`. Real-world risk areas not yet covered include persistence across restarts, the Streamlit UI layer, and month-boundary behavior for `"monthly"` recurrence (which uses a fixed 30-day delta rather than a calendar month).
+✅ Task added successfully for Mochi.
+```
+The AI returns a structured JSON object; the app validates every field before constructing a `Task` and passing it to the Scheduler.
 
 ---
 
-### DEMO 
+### Interaction 2 — AI Care Planner (Post-Surgery Recovery)
 
-![PawPal+ App Screenshot](assignment2_codepath.png)
+**User types a care goal:**
+> "Set up a 2-week post-surgery recovery plan for Mochi. She just had a splenectomy."
 
-## Getting started
+**Proposed task table displayed before confirmation:**
 
-### Setup
+| # | Type | Description | Due Date | Recurrence |
+|---|---|---|---|---|
+| 1 | medication | Pain medication (Buprenorphine) | 2026-04-29 08:00 | daily |
+| 2 | vet | Surgical site check — Day 3 | 2026-05-01 10:00 | None |
+| 3 | feeding | Small, frequent meals — soft food only | 2026-04-29 07:00 | daily |
+| 4 | medication | Antibiotic course (Amoxicillin) | 2026-04-29 08:30 | daily |
+| 5 | vet | Suture removal appointment | 2026-05-13 10:00 | None |
 
-```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+The owner clicks **"Confirm and add all tasks"** — all five enter the Scheduler at once. Any conflicts with existing tasks surface as warnings before the button is shown.
+
+---
+
+### Interaction 3 — Conflict Detection
+
+**Scenario:** Owner adds a grooming session for Luna at 3:00 PM. An existing feeding task for Max (a different pet, same owner) is already at 3:10 PM.
+
+**System response:**
+```
+⚠️ Owner conflict: you already have a task for Max (feeding) at 3:10 PM 
+on the same day. Task added, but review your schedule.
 ```
 
-### Suggested workflow
+The task is saved — the owner retains full control — but the warning is prominently shown so they can adjust if needed.
 
-1. Read the scenario carefully and identify requirements and edge cases.
-2. Draft a UML diagram (classes, attributes, methods, relationships).
-3. Convert UML into Python class stubs (no logic yet).
-4. Implement scheduling logic in small increments.
-5. Add tests to verify key behaviors.
-6. Connect your logic to the Streamlit UI in `app.py`.
-7. Refine UML so it matches what you actually built.
+---
+
+### Interaction 4 — Overdue Recurring Task Auto-Advance
+
+**Scenario:** A weekly nail trim was last completed on 2026-03-01. The owner opens the app several weeks later.
+
+**System behavior:**  
+The Scheduler automatically calculates the next occurrence anchored to today, so the task appears due soon rather than weeks overdue. No manual rescheduling is required; the system never schedules a recurring task in the past.
+
+---
+
+## Design Decisions
+
+### 1. AI as an Input Layer, Not a Core Dependency
+
+The AI features sit entirely above the domain model. `pawpal_system.py` was written in Module 1 and was never modified when adding AI. This means the app degrades gracefully — if Ollama is not running, manual task entry still works perfectly.
+
+**Trade-off:** All validation work to bridge the model's open-ended output to strict Python types (task type enum, ISO 8601 datetime, recurrence enum) lives in `ai_parser.py` and `ai_planner.py`. The mapping layer is non-trivial, but it kept the domain model clean and stable.
+
+### 2. Local LLM via Ollama — No API Key, No Cloud
+
+Using Ollama with Mistral means the app runs entirely offline, with no API costs and no data leaving the machine — appropriate for a pet health app that may contain sensitive medical history.
+
+**Trade-off:** Mistral's capabilities are lower than GPT-4 or Claude. Complex care plan requests occasionally produce malformed JSON. The validation layer handles this gracefully, but prompt engineering had to be more precise than it would be with a frontier model.
+
+### 3. Human-in-the-Loop for the Care Planner
+
+Feature 2 deliberately separates proposal from confirmation. Proposed tasks are held in `st.session_state` and shown to the user before any task enters the Scheduler. The owner must click "Confirm" explicitly.
+
+**Trade-off:** One extra click. But for a healthcare-adjacent domain — where a wrongly scheduled medication could cause real harm — keeping the user in control is the right call. Auto-scheduling would be faster but less safe.
+
+### 4. Temperature 0 for Structured Extraction
+
+Both AI modules call Ollama with `temperature: 0`. Deterministic output is necessary for structured data extraction — creativity is a liability when the model needs to return a specific JSON schema with an ISO 8601 date and a valid enum value.
+
+### 5. Persistent Session State for AI Results
+
+Streamlit reruns the entire script on every interaction. Without explicit session state management, the Care Planner's proposed tasks would vanish the moment the user scrolled. All AI results are stored in `st.session_state` with stable keys that survive reruns.
+
+### 6. Conflict Detection That Warns Without Blocking
+
+The Scheduler always adds a task, even when a conflict is detected. It returns a warning string instead of raising an exception. Owners of multiple pets legitimately need to handle overlapping care windows, and hard blocks would force frustrating workarounds.
+
+---
+
+## Testing Summary
+
+**43 tests total, all passing** across two test files.
+
+### Domain Layer — [tests/test_pawpal.py](tests/test_pawpal.py) — 13 tests
+
+| Category | Tests |
+|---|---|
+| Chronological task sorting | 3 |
+| Medical-priority tie-breaking | 2 |
+| Recurrence logic (daily / weekly / monthly) | 3 |
+| Overdue recurring task rescheduling | 1 |
+| Conflict detection (same-pet, cross-pet, different owners) | 3 |
+| Completed tasks vacating conflict slots | 1 |
+
+### AI Layer — [tests/test_ai_layer.py](tests/test_ai_layer.py) — 30 tests
+
+All AI tests mock `urllib.request.urlopen` so they run without Ollama running — the mock simulates any model output or failure mode deterministically.
+
+**`ai_parser` (16 tests)**
+
+| Category | Tests |
+|---|---|
+| Valid response → correct dict with all fields | 3 |
+| Output cleaning (markdown fences, surrounding prose) | 2 |
+| Missing required fields (type, due_date, description) | 3 |
+| Invalid field values (bad type, bad date, bad recurrence) | 3 |
+| Model returns `{"error": ...}` or plain text | 2 |
+| Connection refused, network error, unexpected exception | 3 |
+
+**`ai_planner` (14 tests)**
+
+| Category | Tests |
+|---|---|
+| Valid response → Task objects with correct IDs and ownership | 4 |
+| Invalid items skipped (bad type, bad date, all invalid) | 3 |
+| Invalid recurrence clamped to None | 1 |
+| Internal plan conflict drops second overlapping item | 1 |
+| Scheduler conflict keeps item in proposal for user review | 1 |
+| Connection refused, object-not-array, plain text, unexpected exception | 4 |
+
+### What Worked
+
+- **Priority tie-breaking** — The sorting key `(due_date, PRIORITY_MAP.get(task.type, 99))` handles unknown task types gracefully by sorting them last rather than crashing.
+- **Recurrence anchoring** — Anchoring `get_next_occurrence()` to today rather than the original due date ensures overdue recurring tasks never schedule themselves in the past. This was explicitly verified in a test before the AI features were added.
+- **Conflict detection** — Correctly distinguishes same-pet and cross-pet conflicts, and correctly ignores completed tasks when checking overlaps.
+- **Testing the AI validation layer without Ollama** — Mocking the HTTP call let every validation and error-handling path be tested in isolation, fast and reproducibly. Each distinct failure mode (missing field, bad enum, non-JSON, connection refused) got its own test.
+- **Separation of concerns paid off in testing** — Because the AI modules never raise exceptions and always return `(result, error_string)`, every test could assert on the return value without try/except boilerplate. The clean interface made the tests simple to write.
+- **Testing before AI integration** — Having a verified domain layer made debugging the AI features significantly faster. When an AI-generated task behaved unexpectedly, the Scheduler logic could be ruled out immediately.
+
+### What Didn't Work / Known Limitations
+
+- **Month-boundary recurrence** uses a fixed 30-day delta rather than calendar-aware logic. A task due January 31 advanced by one "month" lands March 2, not February 28.
+- **Streamlit UI layer** is not covered by automated tests. Feature correctness was verified manually through the running app.
+- **No end-to-end integration test** covers the full path from text input → AI parsing → Task creation → Scheduler conflict detection. Each layer is tested in isolation.
+- **No real model calls in tests** — the mocked tests verify that the validation logic handles bad output correctly, but they don't test whether the prompts actually produce good output from Mistral. That gap can only be closed with a separate manual or integration test that hits a live Ollama instance.
+
+### What I Learned About Testing AI Systems
+
+Testing the validation layer with mocks was straightforward — it's just regular Python unit testing. The harder insight was recognizing what mocks *cannot* test: prompt quality, model consistency across phrasings, and latency under load. Those require a live model and human evaluation. The automated tests give confidence that the system handles bad output gracefully; they say nothing about how often bad output actually occurs. A complete test strategy needs both.
+
+---
+
+## Reflection
+
+### What This Project Taught Me About AI
+
+The most surprising realization was how much engineering lives *outside* the model. Writing a good prompt took a few hours. Writing the validation, error handling, session state management, and graceful degradation code took days. The model is a small fraction of a working AI system — the real engineering challenge is everything around it: how you feed data in, how you validate what comes out, how you keep the user informed when things go wrong, and how you make the overall system feel reliable even when the model occasionally isn't.
+
+I also learned that local models like Mistral are genuinely capable for structured extraction tasks when prompted carefully. Temperature 0 and an explicit JSON schema in the system prompt made a significant difference in output reliability. Mistral's failures were predictable and handleable rather than mysterious — that predictability made it a valuable learning environment.
+
+### What This Project Taught Me About Problem-Solving
+
+The best technical decision I made was not modifying `pawpal_system.py` when adding AI features. It was tempting to add AI-specific fields to `Task` or shortcuts to `Scheduler`. Resisting that kept the domain model clean and made the AI integration genuinely modular. The guiding question — *does this change belong to the domain, or to the input layer?* — is a principle I'll carry into future projects.
+
+The human-in-the-loop design for the Care Planner came from a concrete failure during development: I let the planner auto-schedule a set of proposed tasks and watched it create a medication reminder at 3 a.m. It was technically valid output; it was also completely useless in practice. That moment made the value of a confirmation step immediately obvious. AI systems operating in real-world domains — especially health-adjacent ones — need human review, not because the model is untrustworthy in general, but because the model doesn't know what the user actually needs.
+
+Finally, building the UI taught me that functional correctness and user-experience correctness are different problems. A feature can pass all its unit tests and still feel broken because a loading spinner disappears too fast or a result disappears on the next interaction. Testing the golden path manually — across realistic scenarios — is irreplaceable.
+
+---
+
+## Project Structure
+
+```
+applied-ai-system-project/
+├── app.py                  # Streamlit UI (4 sections, session state management)
+├── pawpal_system.py        # Core domain model — Owner, Pet, Task, Scheduler
+├── ai_parser.py            # Feature 1: natural language → validated task fields
+├── ai_planner.py           # Feature 2: care goal + pet context → multi-task plan
+├── requirements.txt        # streamlit, pytest, python-dotenv
+├── ARCHITECTURE.md         # Detailed system diagrams and design notes
+├── reflection.md           # Extended project reflection
+├── tests/
+│   └── test_pawpal.py      # 13 unit tests covering core scheduler behaviors
+└── .env (optional)         # OLLAMA_URL and OLLAMA_MODEL overrides
+```
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| UI | Streamlit |
+| Domain logic | Python 3.10+ dataclasses |
+| AI inference | Ollama (local) + Mistral 7B |
+| Testing | pytest |
+| Configuration | python-dotenv |
+
+---
+
+*Built by Venkata Sai Renusree Bandaru as the capstone project for an Applied AI Systems course.*
