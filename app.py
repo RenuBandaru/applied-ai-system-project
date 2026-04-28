@@ -9,6 +9,13 @@ except ImportError as _e:
     _AI_AVAILABLE = False
     _AI_IMPORT_ERROR = str(_e)
 
+try:
+    from ai_planner import run_planner_agent
+    _PLANNER_AVAILABLE = True
+except ImportError as _pe:
+    _PLANNER_AVAILABLE = False
+    _PLANNER_IMPORT_ERROR = str(_pe)
+
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 
 st.title("🐾 PawPal+")
@@ -25,11 +32,16 @@ if "pet" not in st.session_state:
     st.session_state.pet = None
 # NL tab: store parse result and task outcome so they survive reruns
 if "nl_parse_result" not in st.session_state:
-    st.session_state.nl_parse_result = None   # dict of extracted fields, or None
+    st.session_state.nl_parse_result = None
 if "nl_parse_error" not in st.session_state:
-    st.session_state.nl_parse_error = None    # error string, or None
+    st.session_state.nl_parse_error = None
 if "nl_task_status" not in st.session_state:
-    st.session_state.nl_task_status = None    # ("success"|"warning", message)
+    st.session_state.nl_task_status = None
+# Planner: store proposed task list and error so they survive reruns
+if "planner_proposal" not in st.session_state:
+    st.session_state.planner_proposal = None  # list[Task] or None
+if "planner_error" not in st.session_state:
+    st.session_state.planner_error = None     # error string or None
 
 # ── Section 1: Owner & Pet registration ─────────────────────────────────────
 # The user provides a name, pet name, and species.
@@ -339,3 +351,102 @@ if st.button("Generate schedule"):
                 f"{len(upcoming)} task{'s' if len(upcoming) != 1 else ''} scheduled "
                 f"over the next {days_ahead} day{'s' if days_ahead != 1 else ''}."
             )
+
+st.divider()
+
+# ── Section 4: AI Care Planner ────────────────────────────────────────────────
+# The agent calls four tools that query real Pet / Scheduler data before
+# proposing tasks. Tasks only enter the Scheduler after the user clicks Confirm.
+# Results are stored in session_state so they survive Streamlit reruns.
+st.subheader("AI Care Planner")
+
+if not _PLANNER_AVAILABLE:
+    st.error(
+        f"Planner unavailable ({_PLANNER_IMPORT_ERROR}). "
+        "Run: pip install -r requirements.txt"
+    )
+else:
+    st.caption(
+        "Describe a care goal in one sentence. The AI reads your pet's profile and "
+        "current schedule, checks for conflicts, and proposes a full task plan."
+    )
+
+    goal_text = st.text_area(
+        "Care goal",
+        placeholder=(
+            'e.g. "Luna just had surgery — set up a 2-week recovery plan"\n'
+            'e.g. "Buddy needs a complete wellness routine starting next week"\n'
+            'e.g. "Set up monthly grooming and weekly exercise for Mochi"'
+        ),
+        height=90,
+        key="planner_goal",
+    )
+
+    if st.button("Generate care plan", key="planner_generate"):
+        st.session_state.planner_proposal = None
+        st.session_state.planner_error    = None
+
+        if st.session_state.owner is None or st.session_state.pet is None:
+            st.session_state.planner_error = "Please register an owner and pet first."
+        elif not goal_text.strip():
+            st.session_state.planner_error = "Please enter a care goal before generating a plan."
+        else:
+            owner: Owner       = st.session_state.owner
+            pet: Pet           = st.session_state.pet
+            scheduler: Scheduler = st.session_state.scheduler
+
+            with st.spinner("AI agent is reading your pet's profile, checking the schedule, and building a plan…"):
+                tasks, error = run_planner_agent(goal_text, pet, owner, scheduler)
+
+            if error:
+                st.session_state.planner_error = error
+            else:
+                st.session_state.planner_proposal = tasks
+
+    # ── Results rendered outside the button block so they survive reruns ──────
+    if st.session_state.planner_error:
+        st.error(st.session_state.planner_error)
+
+    if st.session_state.planner_proposal:
+        proposal = st.session_state.planner_proposal
+        st.markdown(f"**{len(proposal)} task{'s' if len(proposal) != 1 else ''} proposed** — review below, then confirm to add them to your schedule.")
+
+        st.dataframe(
+            [
+                {
+                    "Priority":    PRIORITY_LABEL.get(t.type, f"⚪ {t.type}"),
+                    "Description": t.description,
+                    "Due":         t.due_date.strftime("%b %d  %H:%M"),
+                    "Recurrence":  f"↻ {t.recurrence}" if t.recurrence else "—",
+                }
+                for t in proposal
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        if st.button("Confirm and add all tasks", key="planner_confirm"):
+            owner: Owner         = st.session_state.owner
+            pet: Pet             = st.session_state.pet
+            scheduler: Scheduler = st.session_state.scheduler
+            conflicts = []
+
+            for task in proposal:
+                # Assign a proper sequential task_id before adding to the Scheduler
+                task.task_id = f"t{len(scheduler.tasks) + 1}"
+                conflict = scheduler.add_task(task, pet)
+                if conflict:
+                    conflicts.append(conflict)
+
+            st.session_state.planner_proposal = None  # clear the proposal
+
+            if conflicts:
+                st.warning(
+                    f"{len(proposal)} task{'s' if len(proposal) != 1 else ''} added with "
+                    f"{len(conflicts)} conflict{'s' if len(conflicts) != 1 else ''}:\n\n"
+                    + "\n".join(conflicts)
+                )
+            else:
+                st.success(
+                    f"{len(proposal)} task{'s' if len(proposal) != 1 else ''} added to your schedule."
+                )
