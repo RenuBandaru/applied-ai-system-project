@@ -2,6 +2,13 @@ import streamlit as st
 from datetime import datetime
 from pawpal_system import Owner, Pet, Task, Scheduler  # Phase 2 classes
 
+try:
+    from ai_parser import parse_task_from_text
+    _AI_AVAILABLE = True
+except ImportError as _e:
+    _AI_AVAILABLE = False
+    _AI_IMPORT_ERROR = str(_e)
+
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 
 st.title("🐾 PawPal+")
@@ -11,109 +18,211 @@ st.title("🐾 PawPal+")
 # st.session_state persists objects across reruns so we don't lose data.
 # We initialize each key only once (on the very first load).
 if "scheduler" not in st.session_state:
-    st.session_state.scheduler = Scheduler()  # central coordinator — holds all tasks and owners
+    st.session_state.scheduler = Scheduler()
 if "owner" not in st.session_state:
-    st.session_state.owner = None             # set when "Register owner & pet" is clicked
+    st.session_state.owner = None
 if "pet" not in st.session_state:
-    st.session_state.pet = None               # set alongside the owner above
+    st.session_state.pet = None
+# NL tab: store parse result and task outcome so they survive reruns
+if "nl_parse_result" not in st.session_state:
+    st.session_state.nl_parse_result = None   # dict of extracted fields, or None
+if "nl_parse_error" not in st.session_state:
+    st.session_state.nl_parse_error = None    # error string, or None
+if "nl_task_status" not in st.session_state:
+    st.session_state.nl_task_status = None    # ("success"|"warning", message)
 
 # ── Section 1: Owner & Pet registration ─────────────────────────────────────
 # The user provides a name, pet name, and species.
 # Clicking "Register" creates real Owner and Pet objects from pawpal_system.py.
 st.subheader("Owner & Pet")
-owner_name = st.text_input("Owner name", value="Jordan")
-pet_name = st.text_input("Pet name", value="Mochi")
-species = st.selectbox("Species", ["dog", "cat", "other"])
+col_o, col_p = st.columns(2)
+with col_o:
+    owner_name = st.text_input("Owner name", value="Jordan")
+with col_p:
+    pet_name = st.text_input("Pet name", value="Mochi")
+
+col_s, col_a = st.columns(2)
+with col_s:
+    species = st.selectbox("Species", ["dog", "cat", "other"])
+with col_a:
+    pet_age = st.number_input("Pet age (years)", min_value=0, max_value=30, value=1)
 
 if st.button("Register owner & pet"):
-    # Pull the shared Scheduler out of session state so Owner can reference it.
-    # Owner stores a reference to Scheduler so it can query tasks without owning them directly.
     scheduler = st.session_state.scheduler
-
-    # Create the Owner — owner_id is a slug (e.g. "jordan") used as a dict key in Scheduler.owners
     owner = Owner(
         owner_id=owner_name.lower().replace(" ", "_"),
         name=owner_name,
-        email="",   # not collected in the UI; defaults to empty
-        phone="",   # not collected in the UI; defaults to empty
+        email="",
+        phone="",
         scheduler=scheduler,
     )
-
-    # Create the Pet — breed/age/weight aren't collected in the UI so we use safe defaults
     pet = Pet(
         name=pet_name,
         species=species,
-        breed="unknown",  # placeholder; could be added to the UI later
-        age=1,            # placeholder default age in years
-        weight=0.0,       # placeholder default weight in kg
-        owner_id=owner.owner_id,  # links Pet back to its Owner
+        breed="unknown",
+        age=pet_age,
+        weight=0.0,
+        owner_id=owner.owner_id,
     )
-
-    owner.add_pet(pet)                    # Owner.add_pet() — appends pet to owner.pets list
-    scheduler.owners[owner.owner_id] = owner  # register owner in Scheduler for O(1) lookup later
-
-    # Save both to session state so other buttons can access them
+    owner.add_pet(pet)
+    scheduler.owners[owner.owner_id] = owner
     st.session_state.owner = owner
     st.session_state.pet = pet
 
-    # Pet.get_profile() returns a formatted summary string, e.g. "Mochi (dog, unknown) - Age: 1, Weight: 0.0kg"
-    st.success(f"Registered {owner.name} with pet: {pet.get_profile()}")
+# Persistent registration status — shown on every rerun, not just after clicking Register.
+if st.session_state.owner is not None:
+    o = st.session_state.owner
+    p = st.session_state.pet
+    st.info(
+        f"**Registered:** {o.name} · "
+        f"{p.name} ({p.species}, {p.age} yr{'s' if p.age != 1 else ''})"
+    )
+else:
+    st.caption("No owner registered yet. Fill in the fields above and click Register.")
 
 st.divider()
 
 # ── Section 2: Add a Task ─────────────────────────────────────────────────────
-# The user describes a care task. Clicking "Add task" creates a Task object
-# and hands it to the Scheduler (which is the single source of truth for all tasks).
+# Two paths to create a task:
+#   • Manual Entry  — fill out the fields yourself (original behaviour)
+#   • AI Entry      — type a sentence; Claude extracts the fields for you
+#
+# Both paths produce the same Task object and call the same Scheduler.add_task()
+# so conflict detection, priority sorting, and recurrence all behave identically.
 st.subheader("Tasks")
-st.caption("Add tasks for your pet. Each task is passed to the Scheduler.")
 
-# Row 1: what the task is
-col1, col2, col3 = st.columns(3)
-with col1:
-    task_title = st.text_input("Task title", value="Morning walk")
-with col2:
-    duration = st.number_input("Duration (minutes)", min_value=1, max_value=240, value=20)
-with col3:
-    # task_type maps to Task.type — the category labels defined in the Task dataclass
-    task_type = st.selectbox("Type", ["feeding", "grooming", "medication", "vet", "exercise"])
+tab_manual, tab_nl = st.tabs(["📋 Manual Entry", "✨ AI – Describe in Plain English"])
 
-# Row 2: when the task is due (Task.due_date requires a full datetime)
-col4, col5 = st.columns(2)
-with col4:
-    due_date = st.date_input("Due date", value=datetime.today())
-with col5:
-    due_time = st.time_input("Due time", value=datetime.now().replace(second=0, microsecond=0).time())
+# ── Tab 1: Manual Entry (original form, unchanged) ───────────────────────────
+with tab_manual:
+    st.caption("Fill in the fields to add a task directly.")
 
-# Optional recurrence — maps to Task.recurrence ("daily", "weekly", "monthly", or None)
-recurrence = st.selectbox("Recurrence", ["none", "daily", "weekly", "monthly"])
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        task_title = st.text_input("Task title", value="Morning walk")
+    with col2:
+        duration = st.number_input("Duration (minutes)", min_value=1, max_value=240, value=20)
+    with col3:
+        task_type = st.selectbox("Type", ["feeding", "grooming", "medication", "vet", "exercise"])
 
-if st.button("Add task"):
-    # Guard: owner and pet must be registered before a task can be created,
-    # because Task needs owner_id and pet_id to link back to them.
-    if st.session_state.owner is None or st.session_state.pet is None:
-        st.warning("Please register an owner and pet first.")
+    col4, col5 = st.columns(2)
+    with col4:
+        due_date = st.date_input("Due date", value=datetime.today())
+    with col5:
+        due_time = st.time_input("Due time", value=datetime.now().replace(second=0, microsecond=0).time())
+
+    recurrence = st.selectbox("Recurrence", ["none", "daily", "weekly", "monthly"])
+
+    if st.button("Add task", key="manual_add"):
+        if st.session_state.owner is None or st.session_state.pet is None:
+            st.warning("Please register an owner and pet first.")
+        else:
+            owner: Owner = st.session_state.owner
+            pet: Pet = st.session_state.pet
+            scheduler: Scheduler = st.session_state.scheduler
+
+            task = Task(
+                task_id=f"t{len(scheduler.tasks) + 1}",
+                type=task_type,
+                description=f"{task_title} ({duration} min)",
+                pet_id=pet.name,
+                owner_id=owner.owner_id,
+                due_date=datetime.combine(due_date, due_time),
+                recurrence=recurrence if recurrence != "none" else None,
+            )
+
+            conflict = scheduler.add_task(task, pet)
+            if conflict:
+                st.warning(f"Task added with a scheduling conflict:\n\n{conflict}")
+            else:
+                st.success(f"Task added: {task.description}")
+
+# ── Tab 2: AI – Natural Language Entry ───────────────────────────────────────
+# Results are stored in st.session_state so they survive the rerun that happens
+# after the spinner disappears — this is why a single click is enough.
+with tab_nl:
+    if not _AI_AVAILABLE:
+        st.error(
+            f"AI features unavailable ({_AI_IMPORT_ERROR}). "
+            "Run: pip install -r requirements.txt"
+        )
     else:
-        owner: Owner = st.session_state.owner
-        pet: Pet = st.session_state.pet
-        scheduler: Scheduler = st.session_state.scheduler
-
-        task = Task(
-            task_id=f"t{len(scheduler.tasks) + 1}",  # simple auto-increment ID (e.g. "t1", "t2")
-            type=task_type,                            # category label from the selectbox
-            description=f"{task_title} ({duration} min)",  # combines title + duration into one string
-            pet_id=pet.name,                           # links task to the pet
-            owner_id=owner.owner_id,                   # links task to the owner
-            due_date=datetime.combine(due_date, due_time),  # merge date + time into one datetime
-            recurrence=recurrence if recurrence != "none" else None,  # None means one-off task
+        st.caption(
+            "Describe what your pet needs in plain English. "
+            "The AI extracts the type, date, and recurrence for you."
+        )
+        nl_text = st.text_area(
+            "Task description",
+            placeholder=(
+                'e.g. "Flea medication every two weeks starting tomorrow at 9am"\n'
+                'e.g. "Daily feeding at 7am"\n'
+                'e.g. "Vet checkup next Monday afternoon"'
+            ),
+            height=100,
+            key="nl_text_input",
         )
 
-        # Scheduler.add_task() returns a conflict warning string, or None if the slot is clear.
-        # We always add the task (the owner stays in control) but surface the warning immediately.
-        conflict = scheduler.add_task(task, pet)
-        if conflict:
-            st.warning(f"Task added with a scheduling conflict:\n\n{conflict}")
-        else:
-            st.success(f"Task added: {task.description}")
+        if st.button("Add task from description", key="nl_add"):
+            # Clear any result from a previous click before running the new one.
+            st.session_state.nl_parse_result = None
+            st.session_state.nl_parse_error = None
+            st.session_state.nl_task_status = None
+
+            if st.session_state.owner is None or st.session_state.pet is None:
+                st.session_state.nl_parse_error = "Please register an owner and pet first."
+            elif not nl_text.strip():
+                st.session_state.nl_parse_error = "Please enter a task description before clicking Add."
+            else:
+                owner: Owner = st.session_state.owner
+                pet: Pet = st.session_state.pet
+                scheduler: Scheduler = st.session_state.scheduler
+
+                with st.spinner("Parsing your description with AI…"):
+                    parsed, error = parse_task_from_text(
+                        user_text=nl_text,
+                        pet_name=pet.name,
+                        owner_id=owner.owner_id,
+                    )
+
+                if error:
+                    st.session_state.nl_parse_error = error
+                else:
+                    task = Task(
+                        task_id=f"t{len(scheduler.tasks) + 1}",
+                        type=parsed["type"],
+                        description=parsed["description"],
+                        pet_id=pet.name,
+                        owner_id=owner.owner_id,
+                        due_date=parsed["due_date"],
+                        recurrence=parsed["recurrence"],
+                    )
+                    conflict = scheduler.add_task(task, pet)
+                    st.session_state.nl_parse_result = parsed
+                    st.session_state.nl_task_status = (
+                        ("warning", conflict) if conflict else ("success", task.description)
+                    )
+
+        # ── Results rendered outside the button block ─────────────────────────
+        # These run on every rerun so the output stays visible after the spinner
+        # completes and Streamlit re-renders the page.
+        if st.session_state.nl_parse_error:
+            st.error(f"Could not parse task: {st.session_state.nl_parse_error}")
+
+        if st.session_state.nl_parse_result:
+            p = st.session_state.nl_parse_result
+            with st.expander("What the AI extracted", expanded=True):
+                st.json({
+                    "type": p["type"],
+                    "description": p["description"],
+                    "due_date": p["due_date"].strftime("%Y-%m-%d %H:%M"),
+                    "recurrence": p["recurrence"] or "none",
+                })
+            if st.session_state.nl_task_status:
+                kind, msg = st.session_state.nl_task_status
+                if kind == "warning":
+                    st.warning(f"Task added with a scheduling conflict:\n\n{msg}")
+                else:
+                    st.success(f"Task added: {msg}")
 
 # ── Task list: split into Pending / Completed tabs ───────────────────────────
 # Uses Scheduler.get_tasks_by_status() so both tabs are sorted by due_date
