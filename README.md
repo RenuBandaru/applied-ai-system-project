@@ -172,7 +172,9 @@ The Scheduler automatically calculates the next occurrence anchored to today, so
 
 ## Demo
 
-<video src="assets/Codepath_Demo.mp4" controls width="100%"></video>
+<video src="https://github.com/user-attachments/assets/3ee92b5d-d114-4bb0-9fa9-5f965fbf7035" controls width="100%"></video>
+
+> If the video does not play, view the walkthrough directly in the [assets/](assets/) folder.
 
 ---
 
