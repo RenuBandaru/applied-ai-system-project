@@ -170,6 +170,12 @@ The Scheduler automatically calculates the next occurrence anchored to today, so
 
 ---
 
+## Demo
+
+<video src="assets/Codepath_Demo.mp4" controls width="100%"></video>
+
+---
+
 ## Design Decisions
 
 ### 1. AI as an Input Layer, Not a Core Dependency

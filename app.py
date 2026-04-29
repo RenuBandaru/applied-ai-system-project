@@ -61,34 +61,51 @@ with col_a:
 
 if st.button("Register owner & pet"):
     scheduler = st.session_state.scheduler
-    owner = Owner(
-        owner_id=owner_name.lower().replace(" ", "_"),
-        name=owner_name,
-        email="",
-        phone="",
-        scheduler=scheduler,
-    )
+    owner_id  = owner_name.lower().replace(" ", "_")
+
+    # Reuse the existing owner if the same owner_id registers again so pets accumulate.
+    # Creating a new Owner each time overwrites the previous one and loses all prior pets.
+    if (st.session_state.owner is not None
+            and st.session_state.owner.owner_id == owner_id):
+        owner = st.session_state.owner
+    else:
+        owner = Owner(
+            owner_id=owner_id,
+            name=owner_name,
+            email="",
+            phone="",
+            scheduler=scheduler,
+        )
+        scheduler.owners[owner_id] = owner
+        st.session_state.owner = owner
+
     pet = Pet(
         name=pet_name,
         species=species,
         breed="unknown",
         age=pet_age,
         weight=0.0,
-        owner_id=owner.owner_id,
+        owner_id=owner_id,
     )
     owner.add_pet(pet)
-    scheduler.owners[owner.owner_id] = owner
-    st.session_state.owner = owner
     st.session_state.pet = pet
 
 # Persistent registration status — shown on every rerun, not just after clicking Register.
 if st.session_state.owner is not None:
-    o = st.session_state.owner
-    p = st.session_state.pet
+    o    = st.session_state.owner
+    pets = o.get_pets()
     st.info(
         f"**Registered:** {o.name} · "
-        f"{p.name} ({p.species}, {p.age} yr{'s' if p.age != 1 else ''})"
+        + ", ".join(f"{p.name} ({p.species}, {p.age} yr{'s' if p.age != 1 else ''})" for p in pets)
     )
+    # Pet selector — only shown when more than one pet is registered.
+    if len(pets) > 1:
+        selected_name = st.selectbox(
+            "Active pet (used for task entry below)",
+            [p.name for p in pets],
+            key="active_pet_selector",
+        )
+        st.session_state.pet = next(p for p in pets if p.name == selected_name)
 else:
     st.caption("No owner registered yet. Fill in the fields above and click Register.")
 
